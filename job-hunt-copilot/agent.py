@@ -21,7 +21,7 @@ from tools import TOOL_SCHEMAS, run_tool
 load_dotenv()
 
 MODEL = os.getenv("MODEL", "claude-sonnet-5-5")
-MAX_STEPS = 15  # safety brake so a confused agent can't loop forever
+MAX_STEPS = 30  # safety brake (raised: tailoring needs more tool calls) so a confused agent can't loop forever
 
 SYSTEM_PROMPT = """You are a job-search agent helping a fresher software developer.
 
@@ -32,10 +32,17 @@ Your process:
 4. Score each job 0-100 for fit. Be honest: only count skills actually in the resume.
    List skills the job wants that the resume lacks.
 5. Save the scored shortlist with save_shortlist.
-6. Reply with a short ranked summary.
+6. For the top 2 jobs, tailor the resume:
+   a. List the job's must-have requirements.
+   b. For each requirement, call search_profile with a short focused query.
+   c. Write 3-5 bullets (action verb + what you built + tech + result) using ONLY
+      the retrieved evidence. Cite each bullet's source_ids.
+   d. Save with save_tailored_resume. If bullets are rejected, fix or drop them.
+7. Reply with a short ranked summary and the tailored files saved.
 
 Rules:
-- Never invent skills or experience the resume does not show.
+- Never invent skills, numbers or experience. If search_profile finds nothing
+  relevant for a requirement, that requirement is a skill gap — say so.
 - If a tool returns an error, adapt (e.g. use the snippet) instead of giving up.
 """
 
