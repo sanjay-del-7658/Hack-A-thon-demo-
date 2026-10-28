@@ -2,3 +2,7 @@ anthropic
 requests
 beautifulsoup4
 python-dotenv
+chromadb
+langgraph>=1.2
+langchain>=1.4
+langchain-anthropic>=1.7

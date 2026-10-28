@@ -16,13 +16,18 @@ import os
 from datetime import datetime
 from pathlib import Path
 
+import re
+
 import requests
 from bs4 import BeautifulSoup
+
+import rag
 
 BASE_DIR = Path(__file__).parent
 RESUME_PATH = BASE_DIR / "resume.txt"
 SHORTLIST_PATH = BASE_DIR / "shortlist.csv"
 SAMPLE_JOBS_PATH = BASE_DIR / "sample_jobs.json"
+TAILORED_DIR = BASE_DIR / "output" / "tailored"
 
 ADZUNA_URL = "https://api.adzuna.com/v1/api/jobs/{country}/search/1"
 
@@ -117,6 +122,49 @@ def save_shortlist(jobs: list) -> dict:
     return {"saved": len(jobs), "file": SHORTLIST_PATH.name}
 
 
+def search_profile(query: str, k: int = 4) -> dict:
+    """RAG retrieval: find the candidate's experience most related to a query."""
+    hits = rag.search(query, k)
+    if not hits:
+        return {"error": "Knowledge base is empty. Run: python rag.py index"}
+    return {"query": query, "results": hits}
+
+
+def save_tailored_resume(company: str, job_title: str, bullets: list) -> dict:
+    """Save tailored resume bullets — but only if every bullet is grounded.
+
+    GUARDRAIL: each bullet must cite a source_id that came from search_profile.
+    Bullets citing nothing (or a made-up source) are rejected and sent back to
+    the agent to fix. This is how we stop the LLM inventing experience.
+    """
+    rejected, accepted = [], []
+    for b in bullets:
+        sources = b.get("source_ids") or []
+        bad = [s for s in sources if not rag.source_exists(s)]
+        if not sources:
+            rejected.append({"bullet": b.get("text", ""), "problem": "no source_ids cited"})
+        elif bad:
+            rejected.append({"bullet": b.get("text", ""), "problem": f"unknown sources {bad}"})
+        else:
+            accepted.append(b)
+
+    if rejected:
+        return {
+            "saved": False,
+            "rejected": rejected,
+            "fix": "Use search_profile to find real evidence, cite its source_id, or drop the bullet.",
+        }
+
+    TAILORED_DIR.mkdir(parents=True, exist_ok=True)
+    slug = re.sub(r"[^a-z0-9]+", "-", f"{company}-{job_title}".lower()).strip("-")
+    path = TAILORED_DIR / f"{slug}.md"
+    lines = [f"# {job_title} @ {company}", ""]
+    for b in accepted:
+        lines.append(f"- {b['text']}  <!-- {', '.join(b['source_ids'])} -->")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return {"saved": True, "file": str(path.relative_to(BASE_DIR)), "bullets": len(accepted)}
+
+
 # --------------------------------------------- schemas the LLM reads
 
 TOOL_SCHEMAS = [
@@ -172,6 +220,41 @@ TOOL_SCHEMAS = [
             "required": ["jobs"],
         },
     },
+    {
+        "name": "search_profile",
+        "description": "Search the candidate's detailed project/experience notes by meaning (RAG). Use one focused query per job requirement, e.g. 'REST API design' or 'MongoDB schema'. Returns chunks with a source_id you must cite.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "k": {"type": "integer", "description": "Number of results (default 4)"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "save_tailored_resume",
+        "description": "Save 3-5 resume bullets tailored to one job. Every bullet MUST cite source_ids returned by search_profile, or it will be rejected.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "company": {"type": "string"},
+                "job_title": {"type": "string"},
+                "bullets": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "text": {"type": "string", "description": "Action verb + what + tech + result"},
+                            "source_ids": {"type": "array", "items": {"type": "string"}},
+                        },
+                        "required": ["text", "source_ids"],
+                    },
+                },
+            },
+            "required": ["company", "job_title", "bullets"],
+        },
+    },
 ]
 
 # Name -> function. agent.py uses this to run whatever the LLM asks for.
@@ -180,6 +263,8 @@ TOOL_FUNCTIONS = {
     "fetch_job_description": fetch_job_description,
     "read_resume": read_resume,
     "save_shortlist": save_shortlist,
+    "search_profile": search_profile,
+    "save_tailored_resume": save_tailored_resume,
 }
 
 
